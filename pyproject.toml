@@ -7,6 +7,7 @@ dependencies = [
     "altair>=5.5.0",
     "fastapi>=0.115.14",
     "httpx>=0.28.1",
+    "ipywidgets>=8.1.8",
     "judgy>=0.1.0",
     "litellm>=1.74.0",
     "matplotlib>=3.10.3",
