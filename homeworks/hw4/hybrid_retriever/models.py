@@ -49,6 +49,56 @@ class RecipeBase(SQLModel, table=False):
     tags: Optional[list] = Field(default=None, sa_column=sa.Column(sa.JSON))
     nutrition: Optional[dict] = Field(default=None, sa_column=sa.Column(sa.JSON))
 
+    def to_embedding_text(self) -> str:
+        """Generate a structured text representation for embedding generation.
+
+        Creates a human-readable, labeled format that includes recipe name,
+        description, ingredients, steps, tags, and relevant metadata.
+
+        Returns:
+            Formatted string suitable for embedding generation.
+        """
+        parts = []
+
+        # Recipe name (most important, comes first)
+        if self.name:
+            parts.append(f"# Recipe: {self.name}")
+
+        # Description
+        if self.description:
+            parts.append(f"\n\n# Description: {self.description}")
+
+        # Ingredients (bulleted list)
+        if self.ingredients:
+            parts.append("\n\n# Ingredients:")
+            for ingredient in self.ingredients:
+                parts.append(f"\n- {ingredient}")
+
+        # Steps (numbered list)
+        if self.steps:
+            parts.append("\n\n# Steps:")
+            for i, step in enumerate(self.steps, start=1):
+                parts.append(f"\n{i}. {step}")
+
+        # Tags (comma-separated)
+        if self.tags:
+            tags_str = ", ".join(self.tags)
+            parts.append(f"\n\n# Tags: {tags_str}")
+
+        # Metadata (useful for filtering/context)
+        metadata_parts = []
+        if self.minutes and self.minutes > 0:
+            metadata_parts.append(f"Cooking Time: {self.minutes} minutes")
+        if self.n_ingredients and self.n_ingredients > 0:
+            metadata_parts.append(f"Number of Ingredients: {self.n_ingredients}")
+        if self.n_steps and self.n_steps > 0:
+            metadata_parts.append(f"Number of Steps: {self.n_steps}")
+
+        if metadata_parts:
+            parts.append("\n\n# Metadata\n" + " | ".join(metadata_parts))
+
+        return "".join(parts).strip()
+
 
 class Recipe(RecipeBase, table=True):
     """Recipe table stored in DuckDB."""

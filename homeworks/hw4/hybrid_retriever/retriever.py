@@ -18,7 +18,7 @@ from .db import (
     init_db,
 )
 from .embeddings import generate_embeddings, generate_query_embedding
-from .models import Recipe, SearchResult
+from .models import Recipe, SearchResult, RecipeBase
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +127,10 @@ class HybridRetriever:
     def load_and_index(self, recipes_path: Path) -> None:
         """One-time setup: load recipes into DuckDB, embed, and index."""
         with open(recipes_path) as f:
-            recipes = json.load(f)
+            recipes_data = json.load(f)
+
+        # Parse JSON into RecipeBase instances for type safety and to use methods
+        recipes: list[RecipeBase] = [RecipeBase.model_validate(r) for r in recipes_data]
 
         # Initialise DB + table
         init_db(self.db_path)
@@ -146,25 +149,25 @@ class HybridRetriever:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    recipe["id"],
-                    recipe["name"],
-                    recipe.get("description", ""),
-                    recipe.get("minutes", 0),
-                    recipe.get("n_ingredients", 0),
-                    recipe.get("n_steps", 0),
-                    recipe.get("submitted"),
-                    recipe.get("contributor_id"),
-                    recipe.get("full_text", ""),
-                    json.dumps(recipe.get("ingredients", [])),
-                    json.dumps(recipe.get("steps", [])),
-                    json.dumps(recipe.get("tags", [])),
-                    json.dumps(recipe.get("nutrition", {})),
+                    recipe.id,
+                    recipe.name,
+                    recipe.description or "",
+                    recipe.minutes,
+                    recipe.n_ingredients,
+                    recipe.n_steps,
+                    recipe.submitted,
+                    recipe.contributor_id,
+                    recipe.full_text or "",
+                    json.dumps(recipe.ingredients or []),
+                    json.dumps(recipe.steps or []),
+                    json.dumps(recipe.tags or []),
+                    json.dumps(recipe.nutrition or {}),
                 ],
             )
 
         # Generate embeddings
         print("Generating embeddings …")
-        texts = [r.get("full_text", "") for r in recipes]
+        texts = [r.to_embedding_text() for r in recipes]
         embeddings = generate_embeddings(texts, model=self.embedding_model)
 
         # Store embeddings
@@ -176,7 +179,7 @@ class HybridRetriever:
             conn.execute(
                 f"UPDATE recipes SET embedding = {emb_literal}::FLOAT[{EMBEDDING_DIM}] "
                 f"WHERE id = ?",
-                [recipe["id"]],
+                [recipe.id],
             )
 
         conn.close()

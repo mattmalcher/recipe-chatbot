@@ -4,7 +4,7 @@ from matplotlib.pylab import isin
 import pytest
 
 from homeworks.hw4.hybrid_retriever.db import EMBEDDING_DIM, get_connection, init_db
-from homeworks.hw4.hybrid_retriever.models import SearchResult
+from homeworks.hw4.hybrid_retriever.models import RecipeBase, SearchResult
 from homeworks.hw4.hybrid_retriever.retriever import (
     HybridRetriever,
     _fts_search,
@@ -208,3 +208,143 @@ class TestHybridRetriever:
         assert isinstance(r.ingredients, list)
         assert r.minutes == 60
         assert r.name == "chocolate cake"
+
+
+# ---------------------------------------------------------------------------
+# RecipeBase serialization
+# ---------------------------------------------------------------------------
+
+
+class TestRecipeBaseSerialization:
+    def test_to_embedding_text_full_recipe(self):
+        """Test that to_embedding_text generates properly formatted output."""
+        recipe = RecipeBase(
+            id=1,
+            name="Chocolate Chip Cookies",
+            description="Classic homemade cookies",
+            ingredients=["flour", "butter", "sugar", "eggs", "chocolate chips"],
+            steps=[
+                "Cream butter and sugar",
+                "Add eggs",
+                "Mix in flour",
+                "Fold in chocolate chips",
+                "Bake at 350F",
+            ],
+            tags=["dessert", "cookies", "chocolate"],
+            minutes=30,
+            n_ingredients=5,
+            n_steps=5,
+        )
+
+        text = recipe.to_embedding_text()
+
+        # Verify all sections present
+        assert "Recipe: Chocolate Chip Cookies" in text
+        assert "Description: Classic homemade cookies" in text
+        assert "Ingredients:" in text
+        assert "- flour" in text
+        assert "- butter" in text
+        assert "Steps:" in text
+        assert "1. Cream butter and sugar" in text
+        assert "2. Add eggs" in text
+        assert "Tags: dessert, cookies, chocolate" in text
+        assert "Cooking Time: 30 minutes" in text
+        assert "Number of Ingredients: 5" in text
+        assert "Number of Steps: 5" in text
+
+    def test_to_embedding_text_minimal(self):
+        """Test edge case with minimal fields."""
+        recipe = RecipeBase(
+            id=2,
+            name="Simple Toast",
+            description="",
+            ingredients=None,
+            steps=None,
+            tags=None,
+            minutes=0,
+        )
+
+        text = recipe.to_embedding_text()
+        assert text == "# Recipe: Simple Toast"
+
+    def test_to_embedding_text_no_description(self):
+        """Test recipe without description."""
+        recipe = RecipeBase(
+            id=3,
+            name="Quick Pasta",
+            description="",
+            ingredients=["pasta", "sauce"],
+            steps=["Boil pasta", "Add sauce"],
+            tags=["quick", "dinner"],
+            minutes=15,
+            n_ingredients=2,
+            n_steps=2,
+        )
+
+        text = recipe.to_embedding_text()
+        assert "Recipe: Quick Pasta" in text
+        assert "Description:" not in text  # Should not have description section
+        assert "Ingredients:" in text
+        assert "- pasta" in text
+        assert "Steps:" in text
+        assert "1. Boil pasta" in text
+
+    def test_to_embedding_text_empty_lists(self):
+        """Test recipe with empty ingredient/step/tag lists."""
+        recipe = RecipeBase(
+            id=4,
+            name="Mystery Recipe",
+            description="A mysterious dish",
+            ingredients=[],
+            steps=[],
+            tags=[],
+            minutes=20,
+            n_ingredients=0,
+            n_steps=0,
+        )
+
+        text = recipe.to_embedding_text()
+        assert "Recipe: Mystery Recipe" in text
+        assert "Description: A mysterious dish" in text
+        # Empty lists should not create sections
+        assert "Ingredients:" not in text
+        assert "Steps:" not in text
+        assert "Tags:" not in text
+        # Zero counts should not be displayed
+        assert "Number of Ingredients:" not in text
+        assert "Number of Steps:" not in text
+        assert "Cooking Time: 20 minutes" in text
+
+    def test_to_embedding_text_structure(self):
+        """Test that the output has proper structure and formatting."""
+        recipe = RecipeBase(
+            id=5,
+            name="Test Recipe",
+            description="Test description",
+            ingredients=["item1", "item2"],
+            steps=["step1", "step2", "step3"],
+            tags=["tag1", "tag2"],
+            minutes=45,
+            n_ingredients=2,
+            n_steps=3,
+        )
+
+        text = recipe.to_embedding_text()
+
+        # Check order: name comes first, then description, then ingredients, etc.
+        name_pos = text.find("Recipe:")
+        desc_pos = text.find("Description:")
+        ing_pos = text.find("Ingredients:")
+        steps_pos = text.find("Steps:")
+        tags_pos = text.find("Tags:")
+
+        assert name_pos < desc_pos < ing_pos < steps_pos < tags_pos
+
+        # Check numbered steps
+        assert "1. step1" in text
+        assert "2. step2" in text
+        assert "3. step3" in text
+
+        # Check bulleted ingredients
+        assert "- item1" in text
+        assert "- item2" in text
