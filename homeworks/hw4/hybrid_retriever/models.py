@@ -62,11 +62,11 @@ class RecipeBase(SQLModel, table=False):
 
         # Recipe name (most important, comes first)
         if self.name:
-            parts.append(f"# Recipe: {self.name}")
+            parts.append(f"# Recipe:\n{self.name}")
 
         # Description
         if self.description:
-            parts.append(f"\n\n# Description: {self.description}")
+            parts.append(f"\n\n# Description:\n{self.description}")
 
         # Ingredients (bulleted list)
         if self.ingredients:

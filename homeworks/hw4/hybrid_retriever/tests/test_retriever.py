@@ -1,4 +1,6 @@
 """Tests for the hybrid_retriever module."""
+import json
+
 from matplotlib.pylab import isin
 
 import pytest
@@ -9,6 +11,7 @@ from homeworks.hw4.hybrid_retriever.retriever import (
     HybridRetriever,
     _fts_search,
     _vector_search,
+    load_recipes,
     reciprocal_rank_fusion,
 )
 from homeworks.hw4.hybrid_retriever.tests.conftest import _make_fake_embedding
@@ -211,6 +214,60 @@ class TestHybridRetriever:
 
 
 # ---------------------------------------------------------------------------
+# Recipe loading
+# ---------------------------------------------------------------------------
+
+
+class TestLoadRecipes:
+    def test_load_recipes_returns_list(self, tmp_path):
+        """Test that load_recipes returns a list of RecipeBase instances."""
+        recipes_file = tmp_path / "test_recipes.json"
+        recipes_file.write_text(
+            json.dumps([
+                {
+                    "id": 1,
+                    "name": "Test Recipe",
+                    "description": "A test",
+                    "ingredients": ["flour", "sugar"],
+                    "steps": ["mix", "bake"],
+                    "tags": ["dessert"],
+                    "minutes": 30,
+                    "n_ingredients": 2,
+                    "n_steps": 2,
+                    "full_text": "test",
+                }
+            ])
+        )
+
+        recipes = load_recipes(recipes_file)
+
+        assert isinstance(recipes, list)
+        assert len(recipes) == 1
+        assert isinstance(recipes[0], RecipeBase)
+        assert recipes[0].name == "Test Recipe"
+        assert recipes[0].ingredients == ["flour", "sugar"]
+
+    def test_load_recipes_validates_data(self, tmp_path):
+        """Test that load_recipes validates recipe data using Pydantic."""
+        recipes_file = tmp_path / "test_recipes.json"
+        recipes_file.write_text(
+            json.dumps([
+                {
+                    "id": 1,
+                    "name": "Valid Recipe",
+                }
+            ])
+        )
+
+        recipes = load_recipes(recipes_file)
+
+        # Pydantic should fill in defaults for missing fields
+        assert recipes[0].description == ""
+        assert recipes[0].minutes == 0
+        assert recipes[0].ingredients is None
+
+
+# ---------------------------------------------------------------------------
 # RecipeBase serialization
 # ---------------------------------------------------------------------------
 
@@ -239,8 +296,8 @@ class TestRecipeBaseSerialization:
         text = recipe.to_embedding_text()
 
         # Verify all sections present
-        assert "Recipe: Chocolate Chip Cookies" in text
-        assert "Description: Classic homemade cookies" in text
+        assert "Recipe:\nChocolate Chip Cookies" in text
+        assert "Description:\nClassic homemade cookies" in text
         assert "Ingredients:" in text
         assert "- flour" in text
         assert "- butter" in text
@@ -265,7 +322,7 @@ class TestRecipeBaseSerialization:
         )
 
         text = recipe.to_embedding_text()
-        assert text == "# Recipe: Simple Toast"
+        assert text == "# Recipe:\nSimple Toast"
 
     def test_to_embedding_text_no_description(self):
         """Test recipe without description."""
@@ -282,7 +339,7 @@ class TestRecipeBaseSerialization:
         )
 
         text = recipe.to_embedding_text()
-        assert "Recipe: Quick Pasta" in text
+        assert "Recipe:\nQuick Pasta" in text
         assert "Description:" not in text  # Should not have description section
         assert "Ingredients:" in text
         assert "- pasta" in text
@@ -304,8 +361,8 @@ class TestRecipeBaseSerialization:
         )
 
         text = recipe.to_embedding_text()
-        assert "Recipe: Mystery Recipe" in text
-        assert "Description: A mysterious dish" in text
+        assert "Recipe:\nMystery Recipe" in text
+        assert "Description:\nA mysterious dish" in text
         # Empty lists should not create sections
         assert "Ingredients:" not in text
         assert "Steps:" not in text

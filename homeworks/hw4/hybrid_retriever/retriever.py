@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Tuple
 
+from pydantic import TypeAdapter
 from sqlalchemy import text
 from sqlmodel import Session, select, Sequence
 from tqdm import tqdm
@@ -19,6 +20,28 @@ from .db import (
 )
 from .embeddings import generate_embeddings, generate_query_embedding
 from .models import Recipe, SearchResult, RecipeBase
+
+
+# ---------------------------------------------------------------------------
+# Recipe loading
+# ---------------------------------------------------------------------------
+
+
+def load_recipes(recipes_path: Path) -> list[RecipeBase]:
+    """Load and parse recipes from JSON file using Pydantic validation.
+
+    Args:
+        recipes_path: Path to the JSON file containing recipe data.
+
+    Returns:
+        List of validated RecipeBase instances.
+    """
+    with open(recipes_path) as f:
+        recipes_data = json.load(f)
+
+    # Use TypeAdapter for efficient batch validation
+    adapter = TypeAdapter(list[RecipeBase])
+    return adapter.validate_python(recipes_data)
 
 
 # ---------------------------------------------------------------------------
@@ -126,11 +149,8 @@ class HybridRetriever:
 
     def load_and_index(self, recipes_path: Path) -> None:
         """One-time setup: load recipes into DuckDB, embed, and index."""
-        with open(recipes_path) as f:
-            recipes_data = json.load(f)
-
-        # Parse JSON into RecipeBase instances for type safety and to use methods
-        recipes: list[RecipeBase] = [RecipeBase.model_validate(r) for r in recipes_data]
+        # Load and validate recipes from JSON
+        recipes: list[RecipeBase] = load_recipes(recipes_path)
 
         # Initialise DB + table
         init_db(self.db_path)
