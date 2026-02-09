@@ -13,6 +13,7 @@ dependencies = [
     "judgy>=0.1.0",
     "litellm>=1.74.0",
     "matplotlib>=3.10.3",
+    "networkx>=3.6.1",
     "numpy>=2.3.1",
     "pandas>=2.3.0",
     "plotly>=6.2.0",
@@ -33,5 +34,6 @@ dependencies = [
 dev = [
     "ipykernel>=7.2.0",
     "nbstripout>=0.8.1",
+    "pyarrow>=23.0.0",
     "pytest>=9.0.2",
 ]
