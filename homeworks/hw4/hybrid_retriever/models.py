@@ -14,6 +14,7 @@ class Recipe(SQLModel, table=True):
     """
 
     __tablename__ = "recipes"
+    __table_args__ = {"extend_existing": True}
 
     id: int = Field(
         sa_column=sa.Column(sa.Integer, primary_key=True, autoincrement=False)
