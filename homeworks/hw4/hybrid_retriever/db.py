@@ -3,19 +3,30 @@
 from pathlib import Path
 
 import duckdb
+from sqlalchemy import event
 from sqlmodel import SQLModel, create_engine
 
-from .models import Recipe  # noqa: F401 – ensure table is registered
-
-EMBEDDING_DIM = 3072  # text-embedding-3-large
+from .models import EMBEDDING_DIM, Recipe  # noqa: F401 – ensure table is registered
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "recipes.duckdb"
 
 
 def get_engine(db_path: Path = DEFAULT_DB_PATH):
-    """Create a SQLAlchemy engine backed by DuckDB."""
+    """Create a SQLAlchemy engine backed by DuckDB.
+
+    FTS, VSS, and HNSW persistence are configured via a connection event
+    so that every connection from the pool has extensions loaded.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    return create_engine(f"duckdb:///{db_path}")
+    engine = create_engine(f"duckdb:///{db_path}")
+
+    @event.listens_for(engine, "connect")
+    def _load_extensions(dbapi_conn, connection_record):
+        dbapi_conn.execute("INSTALL fts; LOAD fts;")
+        dbapi_conn.execute("INSTALL vss; LOAD vss;")
+        dbapi_conn.execute("SET hnsw_enable_experimental_persistence = true;")
+
+    return engine
 
 
 def get_connection(db_path: Path = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection:
@@ -29,21 +40,10 @@ def get_connection(db_path: Path = DEFAULT_DB_PATH) -> duckdb.DuckDBPyConnection
 
 
 def init_db(db_path: Path = DEFAULT_DB_PATH):
-    """Create tables and add the embedding column."""
+    """Create tables (including the embedding column) via SQLModel."""
     engine = get_engine(db_path)
     SQLModel.metadata.create_all(engine)
-    # Dispose engine so the raw connection can acquire the DB file
     engine.dispose()
-
-    # Add embedding column via raw SQL (can't be represented in SQLModel)
-    conn = get_connection(db_path)
-    try:
-        conn.execute(
-            f"ALTER TABLE recipes ADD COLUMN embedding FLOAT[{EMBEDDING_DIM}]"
-        )
-    except duckdb.CatalogException:
-        pass  # Column already exists
-    conn.close()
 
 
 def create_fts_index(db_path: Path = DEFAULT_DB_PATH):

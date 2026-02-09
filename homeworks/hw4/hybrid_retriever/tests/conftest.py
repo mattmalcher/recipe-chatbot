@@ -1,14 +1,18 @@
 """Shared fixtures for hybrid_retriever tests."""
 
+import json
 import random
 
 import pytest
+
+from sqlmodel import Session
 
 from homeworks.hw4.hybrid_retriever.db import (
     EMBEDDING_DIM,
     create_fts_index,
     create_vector_index,
     get_connection,
+    get_engine,
     init_db,
 )
 from homeworks.hw4.hybrid_retriever.retriever import HybridRetriever
@@ -83,8 +87,8 @@ def seeded_db(db_path, sample_recipes):
             INSERT INTO recipes
                 (id, name, description, minutes, n_ingredients, n_steps,
                  submitted, contributor_id, full_text,
-                 ingredients_text, steps_text, tags_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ingredients, steps, tags, nutrition)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 r["id"],
@@ -96,14 +100,33 @@ def seeded_db(db_path, sample_recipes):
                 r.get("submitted"),
                 r.get("contributor_id"),
                 r.get("full_text", ""),
-                " ".join(r.get("ingredients", [])),
-                " ".join(r.get("steps", [])),
-                " ".join(r.get("tags", [])),
+                json.dumps(r.get("ingredients", [])),
+                json.dumps(r.get("steps", [])),
+                json.dumps(r.get("tags", [])),
+                json.dumps(r.get("nutrition", {})),
             ],
         )
     conn.close()
     create_fts_index(db_path)
     return db_path
+
+
+@pytest.fixture
+def seeded_session(seeded_db):
+    """SQLModel Session for a seeded DB (FTS ready, no embeddings)."""
+    engine = get_engine(seeded_db)
+    with Session(engine) as session:
+        yield session
+    engine.dispose()
+
+
+@pytest.fixture
+def populated_session(populated_db):
+    """SQLModel Session for a fully populated DB (FTS + embeddings + HNSW)."""
+    engine = get_engine(populated_db)
+    with Session(engine) as session:
+        yield session
+    engine.dispose()
 
 
 def _make_fake_embedding(seed: int) -> list[float]:
@@ -135,9 +158,6 @@ def populated_db(seeded_db, fake_embeddings):
 
 
 @pytest.fixture
-def retriever(populated_db, sample_recipes):
-    """HybridRetriever backed by populated_db with recipes loaded."""
-    r = HybridRetriever(db_path=populated_db)
-    r.recipes = sample_recipes
-    r._recipe_lookup = {rec["id"]: rec for rec in sample_recipes}
-    return r
+def retriever(populated_db):
+    """HybridRetriever backed by populated_db."""
+    return HybridRetriever(db_path=populated_db)

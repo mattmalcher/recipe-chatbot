@@ -1,24 +1,43 @@
 """SQLModel table definitions for recipe storage in DuckDB."""
+import tabnanny
 
 from typing import Optional
 
 import sqlalchemy as sa
+from sqlalchemy.ext.compiler import compiles
 from sqlmodel import Field, SQLModel
 
+EMBEDDING_DIM = 3072
 
-class Recipe(SQLModel, table=True):
-    """Recipe table stored in DuckDB.
 
-    The embedding column (FLOAT[3072]) is added via raw SQL in db.py
-    because SQLModel cannot represent DuckDB's fixed-size array type.
+class DuckDBArrayType(sa.types.TypeEngine):
+    """Custom SQLAlchemy type for DuckDB fixed-size arrays (e.g. FLOAT[3072]).
+
+    DuckDB stores vector embeddings as fixed-size typed arrays like FLOAT[N],
+    but neither SQLAlchemy nor SQLModel has a built-in type for this.
+    duckdb_engine inherits from the PostgreSQL dialect, which only supports
+    variable-length ARRAY — not the fixed-size variant DuckDB uses for VSS.
+
+    This type uses SQLAlchemy's @compiles extension (the same mechanism
+    duckdb_engine itself uses for Struct/Map in datatypes.py) to emit the
+    correct DDL so that SQLModel.metadata.create_all() can create the
+    column without falling back to raw SQL ALTER TABLE.
     """
 
-    __tablename__ = "recipes"
-    __table_args__ = {"extend_existing": True}
+    __visit_name__ = "duckdb_array"
+    cache_ok = True
 
-    id: int = Field(
-        sa_column=sa.Column(sa.Integer, primary_key=True, autoincrement=False)
-    )
+    def __init__(self, item_type: str = "FLOAT", size: int = EMBEDDING_DIM):
+        self.item_type = item_type
+        self.size = size
+
+
+@compiles(DuckDBArrayType, "duckdb")
+def _compile_duckdb_array(type_, compiler, **kw):
+    return f"{type_.item_type}[{type_.size}]"
+
+class RecipeBase(SQLModel, table=False):
+    id: int
     name: str
     description: str = Field(default="", sa_column=sa.Column(sa.Text))
     minutes: int = Field(default=0)
@@ -27,6 +46,28 @@ class Recipe(SQLModel, table=True):
     submitted: Optional[str] = Field(default=None)
     contributor_id: Optional[int] = Field(default=None)
     full_text: str = Field(default="", sa_column=sa.Column(sa.Text))
-    ingredients_text: str = Field(default="", sa_column=sa.Column(sa.Text))
-    steps_text: str = Field(default="", sa_column=sa.Column(sa.Text))
-    tags_text: str = Field(default="", sa_column=sa.Column(sa.Text))
+    ingredients: Optional[list] = Field(default=None, sa_column=sa.Column(sa.JSON))
+    steps: Optional[list] = Field(default=None, sa_column=sa.Column(sa.JSON))
+    tags: Optional[list] = Field(default=None, sa_column=sa.Column(sa.JSON))
+    nutrition: Optional[dict] = Field(default=None, sa_column=sa.Column(sa.JSON))
+
+
+class Recipe(RecipeBase, table=True):
+    """Recipe table stored in DuckDB."""
+
+    __tablename__ = "recipes"
+    __table_args__ = {"extend_existing": True}
+
+    id: int = Field(
+        sa_column=sa.Column(sa.Integer, primary_key=True, autoincrement=False)
+    )
+    embedding: Optional[bytes] = Field(
+        default=None,
+        sa_column=sa.Column(DuckDBArrayType(), nullable=True),
+    )
+    
+
+class SearchResult(RecipeBase, table=False):
+    rank:int
+    bm25_score:float
+    

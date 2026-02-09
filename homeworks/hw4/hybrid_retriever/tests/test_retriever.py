@@ -1,8 +1,10 @@
 """Tests for the hybrid_retriever module."""
+from matplotlib.pylab import isin
 
 import pytest
 
 from homeworks.hw4.hybrid_retriever.db import EMBEDDING_DIM, get_connection, init_db
+from homeworks.hw4.hybrid_retriever.models import SearchResult
 from homeworks.hw4.hybrid_retriever.retriever import (
     HybridRetriever,
     _fts_search,
@@ -19,50 +21,47 @@ from homeworks.hw4.hybrid_retriever.tests.conftest import _make_fake_embedding
 
 class TestReciprocalRankFusion:
     def test_single_ranking(self):
-        ranking = [
-            {"id": 1, "name": "a"},
-            {"id": 2, "name": "b"},
-        ]
+        ranking = [(1, 2.5), (2, 1.0)]
         fused = reciprocal_rank_fusion(ranking, k=60)
 
-        assert fused[0]["id"] == 1
-        assert fused[1]["id"] == 2
-        assert fused[0]["rrf_score"] == pytest.approx(1.0 / (60 + 1))
-        assert fused[1]["rrf_score"] == pytest.approx(1.0 / (60 + 2))
+        assert fused[0][0] == 1
+        assert fused[1][0] == 2
+        assert fused[0][1] == pytest.approx(1.0 / (60 + 1))
+        assert fused[1][1] == pytest.approx(1.0 / (60 + 2))
 
     def test_two_rankings_overlap_boosts(self):
-        r1 = [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
-        r2 = [{"id": 1, "name": "a"}, {"id": 3, "name": "c"}]
+        r1 = [(1, 2.5), (2, 1.0)]
+        r2 = [(1, 3.0), (3, 0.5)]
         fused = reciprocal_rank_fusion(r1, r2, k=60)
 
         # Doc 1 appears in both lists so it should be ranked first
-        assert fused[0]["id"] == 1
+        assert fused[0][0] == 1
         expected = 1.0 / (60 + 1) + 1.0 / (60 + 1)
-        assert fused[0]["rrf_score"] == pytest.approx(expected)
+        assert fused[0][1] == pytest.approx(expected)
 
     def test_two_rankings_disjoint(self):
-        r1 = [{"id": 1, "name": "a"}]
-        r2 = [{"id": 2, "name": "b"}]
+        r1 = [(1, 2.5)]
+        r2 = [(2, 3.0)]
         fused = reciprocal_rank_fusion(r1, r2, k=60)
 
-        ids = {item["id"] for item in fused}
+        ids = {doc_id for doc_id, _ in fused}
         assert ids == {1, 2}
         # Both have equal score (rank 1 in their respective lists)
-        assert fused[0]["rrf_score"] == fused[1]["rrf_score"]
+        assert fused[0][1] == fused[1][1]
 
     def test_custom_k(self):
-        ranking = [{"id": 1, "name": "a"}]
+        ranking = [(1, 2.5)]
         fused_low = reciprocal_rank_fusion(ranking, k=1)
         fused_high = reciprocal_rank_fusion(ranking, k=1000)
 
-        assert fused_low[0]["rrf_score"] > fused_high[0]["rrf_score"]
+        assert fused_low[0][1] > fused_high[0][1]
 
-    def test_hybrid_rank_assigned(self):
-        r1 = [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}, {"id": 3, "name": "c"}]
+    def test_preserves_order(self):
+        r1 = [(1, 3.0), (2, 2.0), (3, 1.0)]
         fused = reciprocal_rank_fusion(r1, k=60)
 
-        for i, item in enumerate(fused):
-            assert item["hybrid_rank"] == i + 1
+        doc_ids = [doc_id for doc_id, _ in fused]
+        assert doc_ids == [1, 2, 3]
 
 
 # ---------------------------------------------------------------------------
@@ -103,44 +102,30 @@ class TestDatabase:
 
 
 class TestFTSSearch:
-    def test_returns_results(self, seeded_db):
-        conn = get_connection(seeded_db)
-        results = _fts_search(conn, "chocolate cake", top_k=5)
-        conn.close()
-
+    def test_returns_results(self, seeded_session):
+        results = _fts_search(seeded_session, "chocolate cake", top_k=5)
         assert len(results) > 0
-        assert results[0]["id"] == 1  # chocolate cake recipe
+        assert results[0][0] == 1  # chocolate cake recipe id
 
-    def test_ranking_order(self, seeded_db):
-        conn = get_connection(seeded_db)
-        results = _fts_search(conn, "chicken pasta", top_k=5)
-        conn.close()
-
-        scores = [r["fts_score"] for r in results]
+    def test_ranking_order(self, seeded_session):
+        results = _fts_search(seeded_session, "chicken pasta", top_k=5)
+        scores = [score for _, score in results]
         assert scores == sorted(scores, reverse=True)
 
-    def test_respects_top_k(self, seeded_db):
-        conn = get_connection(seeded_db)
-        results = _fts_search(conn, "dinner", top_k=1)
-        conn.close()
-
+    def test_respects_top_k(self, seeded_session):
+        results = _fts_search(seeded_session, "dinner", top_k=1)
         assert len(results) <= 1
 
-    def test_no_match(self, seeded_db):
-        conn = get_connection(seeded_db)
-        results = _fts_search(conn, "xyznonexistentterm", top_k=5)
-        conn.close()
-
+    def test_no_match(self, seeded_session):
+        results = _fts_search(seeded_session, "xyznonexistentterm", top_k=5)
         assert results == []
 
-    def test_result_keys(self, seeded_db):
-        conn = get_connection(seeded_db)
-        results = _fts_search(conn, "chocolate", top_k=1)
-        conn.close()
-
+    def test_returns_tuples(self, seeded_session):
+        results = _fts_search(seeded_session, "chocolate", top_k=1)
         assert len(results) > 0
-        r = results[0]
-        assert set(r.keys()) == {"id", "name", "fts_score", "fts_rank"}
+        doc_id, score = results[0]
+        assert isinstance(doc_id, int)
+        assert isinstance(score, float)
 
 
 # ---------------------------------------------------------------------------
@@ -149,39 +134,28 @@ class TestFTSSearch:
 
 
 class TestVectorSearch:
-    def test_returns_results(self, populated_db):
-        conn = get_connection(populated_db)
+    def test_returns_results(self, populated_session):
         query_emb = _make_fake_embedding(seed=999)
-        results = _vector_search(conn, query_emb, top_k=5)
-        conn.close()
-
+        results = _vector_search(populated_session, query_emb, top_k=5)
         assert len(results) > 0
 
-    def test_respects_top_k(self, populated_db):
-        conn = get_connection(populated_db)
+    def test_respects_top_k(self, populated_session):
         query_emb = _make_fake_embedding(seed=999)
-        results = _vector_search(conn, query_emb, top_k=1)
-        conn.close()
-
+        results = _vector_search(populated_session, query_emb, top_k=1)
         assert len(results) == 1
 
-    def test_score_range(self, populated_db):
-        conn = get_connection(populated_db)
+    def test_score_range(self, populated_session):
         query_emb = _make_fake_embedding(seed=999)
-        results = _vector_search(conn, query_emb, top_k=5)
-        conn.close()
+        results = _vector_search(populated_session, query_emb, top_k=5)
+        for _doc_id, score in results:
+            assert -1.0 <= score <= 1.0
 
-        for r in results:
-            assert -1.0 <= r["vector_score"] <= 1.0
-
-    def test_result_keys(self, populated_db):
-        conn = get_connection(populated_db)
+    def test_returns_tuples(self, populated_session):
         query_emb = _make_fake_embedding(seed=999)
-        results = _vector_search(conn, query_emb, top_k=1)
-        conn.close()
-
-        r = results[0]
-        assert set(r.keys()) == {"id", "name", "vector_distance", "vector_score", "vector_rank"}
+        results = _vector_search(populated_session, query_emb, top_k=1)
+        doc_id, score = results[0]
+        assert isinstance(doc_id, int)
+        assert isinstance(score, float)
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +167,7 @@ class TestHybridRetriever:
     def test_retrieve_fts_mode(self, retriever):
         results = retriever.retrieve("chocolate", top_k=3, mode="fts")
         assert len(results) > 0
-        assert results[0]["name"] == "chocolate cake"
+        assert results[0].name == "chocolate cake"
 
     def test_retrieve_vector_mode(self, retriever, monkeypatch):
         fake_emb = _make_fake_embedding(seed=1)  # same seed as recipe 1
@@ -225,15 +199,12 @@ class TestHybridRetriever:
     def test_result_has_required_keys(self, retriever):
         results = retriever.retrieve("pasta", top_k=3, mode="fts")
         for r in results:
-            assert "id" in r
-            assert "name" in r
-            assert "bm25_score" in r
-            assert "rank" in r
+            assert isinstance(r, SearchResult)
 
-    def test_enrich_merges_recipe_data(self, retriever):
-        results = retriever.retrieve("chocolate", top_k=1, mode="fts")
-        r = results[0]
-        # These fields come from the recipe dict, not from FTS
-        assert "ingredients" in r
-        assert "minutes" in r
-        assert r["minutes"] == 60
+    def test_result_includes_recipe_data(self, retriever):
+        results: list[SearchResult] = retriever.retrieve("chocolate", top_k=1, mode="fts")
+        r: SearchResult = results[0]
+        # Recipe fields come from SQLModel, JSON columns are auto-deserialized
+        assert isinstance(r.ingredients, list)
+        assert r.minutes == 60
+        assert r.name == "chocolate cake"

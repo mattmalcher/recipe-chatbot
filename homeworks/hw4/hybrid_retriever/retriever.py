@@ -2,9 +2,10 @@
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Tuple
 
-import duckdb
+from sqlalchemy import text
+from sqlmodel import Session, select, Sequence
 from tqdm import tqdm
 
 from .db import (
@@ -13,70 +14,60 @@ from .db import (
     create_fts_index,
     create_vector_index,
     get_connection,
+    get_engine,
     init_db,
 )
 from .embeddings import generate_embeddings, generate_query_embedding
+from .models import Recipe, SearchResult
 
 
 # ---------------------------------------------------------------------------
-# Low-level search helpers
+# Low-level search helpers (return id + score tuples for ranking)
 # ---------------------------------------------------------------------------
 
 
 def _fts_search(
-    conn: duckdb.DuckDBPyConnection,
+    session: Session,
     query: str,
     top_k: int = 10,
-) -> List[Dict[str, Any]]:
+) -> List[Tuple[int, float]]:
     """Full-text search via DuckDB FTS extension (BM25 scoring)."""
-    rows = conn.execute(
-        """
-        SELECT id, name, score
-        FROM (
-            SELECT *, fts_main_recipes.match_bm25(id, ?, fields := 'full_text') AS score
-            FROM recipes
-        ) sq
-        WHERE score IS NOT NULL
-        ORDER BY score DESC
-        LIMIT ?
-        """,
-        [query, top_k],
+    rows = session.execute(  # ty:ignore[deprecated]
+        text(
+            "SELECT id, score FROM ("
+            "  SELECT id, fts_main_recipes.match_bm25(id, :query, fields := 'full_text') AS score"
+            "  FROM recipes"
+            ") sq "
+            "WHERE score IS NOT NULL "
+            "ORDER BY score DESC "
+            "LIMIT :top_k"
+        ),
+        {"query": query, "top_k": top_k},
     ).fetchall()
 
-    return [
-        {"id": row[0], "name": row[1], "fts_score": float(row[2]), "fts_rank": rank + 1}
-        for rank, row in enumerate(rows)
-    ]
+    return [(row[0], float(row[1])) for row in rows]
 
 
 def _vector_search(
-    conn: duckdb.DuckDBPyConnection,
+    session: Session,
     query_embedding: List[float],
     top_k: int = 10,
-) -> List[Dict[str, Any]]:
+) -> List[Tuple[int, float]]:
     """Vector similarity search via DuckDB VSS extension (cosine distance)."""
     emb_literal = "[" + ",".join(str(x) for x in query_embedding) + "]"
-    rows = conn.execute(
-        f"""
-        SELECT id, name,
-               array_cosine_distance(embedding, {emb_literal}::FLOAT[{EMBEDDING_DIM}]) AS distance
-        FROM recipes
-        WHERE embedding IS NOT NULL
-        ORDER BY distance ASC
-        LIMIT {top_k}
-        """
+    rows = session.execute(  # ty:ignore[deprecated]
+        text(
+            f"SELECT id, "
+            f"       array_cosine_distance(embedding, {emb_literal}::FLOAT[{EMBEDDING_DIM}]) AS distance "
+            f"FROM recipes "
+            f"WHERE embedding IS NOT NULL "
+            f"ORDER BY distance ASC "
+            f"LIMIT :top_k"
+        ),
+        {"top_k": top_k},
     ).fetchall()
 
-    return [
-        {
-            "id": row[0],
-            "name": row[1],
-            "vector_distance": float(row[2]),
-            "vector_score": 1.0 - float(row[2]),
-            "vector_rank": rank + 1,
-        }
-        for rank, row in enumerate(rows)
-    ]
+    return [(row[0], 1.0 - float(row[1])) for row in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -85,28 +76,22 @@ def _vector_search(
 
 
 def reciprocal_rank_fusion(
-    *rankings: List[Dict[str, Any]],
+    *rankings: List[Tuple[int, float]],
     k: int = 60,
-) -> List[Dict[str, Any]]:
+) -> List[Tuple[int, float]]:
     """Combine ranked lists using Reciprocal Rank Fusion.
 
-    rrf_score(doc) = Σ  1 / (k + rank_i)  over all ranking lists.
+    Each ranking is a list of (doc_id, score) tuples, ordered by relevance.
+    Returns fused (doc_id, rrf_score) tuples sorted by RRF score descending.
     """
     scores: Dict[int, float] = {}
-    metadata: Dict[int, Dict[str, Any]] = {}
 
     for ranking in rankings:
-        for rank_pos, item in enumerate(ranking, start=1):
-            doc_id = item["id"]
+        for rank_pos, (doc_id, _score) in enumerate(ranking, start=1):
             scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank_pos)
-            if doc_id not in metadata:
-                metadata[doc_id] = item
 
     fused = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    return [
-        {**metadata[doc_id], "rrf_score": score, "hybrid_rank": rank + 1}
-        for rank, (doc_id, score) in enumerate(fused)
-    ]
+    return [(doc_id, score) for doc_id, score in fused]
 
 
 # ---------------------------------------------------------------------------
@@ -129,14 +114,11 @@ class HybridRetriever:
         embedding_model: str = "text-embedding-3-large",
     ):
         self.db_path = db_path
+        self.engine = get_engine(db_path)
         self.rrf_k = rrf_k
         self.fts_top_k = fts_top_k
         self.vector_top_k = vector_top_k
         self.embedding_model = embedding_model
-
-        # Loaded recipe dicts (for enriching results)
-        self.recipes: List[Dict[str, Any]] = []
-        self._recipe_lookup: Dict[int, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Setup
@@ -145,23 +127,23 @@ class HybridRetriever:
     def load_and_index(self, recipes_path: Path) -> None:
         """One-time setup: load recipes into DuckDB, embed, and index."""
         with open(recipes_path) as f:
-            self.recipes = json.load(f)
-        self._recipe_lookup = {r["id"]: r for r in self.recipes}
+            recipes = json.load(f)
 
         # Initialise DB + table
         init_db(self.db_path)
+        self.engine.dispose()
         conn = get_connection(self.db_path)
 
         # Insert recipes
-        print(f"Inserting {len(self.recipes)} recipes into DuckDB …")
-        for recipe in tqdm(self.recipes, desc="Inserting recipes"):
+        print(f"Inserting {len(recipes)} recipes into DuckDB …")
+        for recipe in tqdm(recipes, desc="Inserting recipes"):
             conn.execute(
                 """
                 INSERT OR REPLACE INTO recipes
                     (id, name, description, minutes, n_ingredients, n_steps,
                      submitted, contributor_id, full_text,
-                     ingredients_text, steps_text, tags_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ingredients, steps, tags, nutrition)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     recipe["id"],
@@ -173,21 +155,22 @@ class HybridRetriever:
                     recipe.get("submitted"),
                     recipe.get("contributor_id"),
                     recipe.get("full_text", ""),
-                    " ".join(recipe.get("ingredients", [])),
-                    " ".join(recipe.get("steps", [])),
-                    " ".join(recipe.get("tags", [])),
+                    json.dumps(recipe.get("ingredients", [])),
+                    json.dumps(recipe.get("steps", [])),
+                    json.dumps(recipe.get("tags", [])),
+                    json.dumps(recipe.get("nutrition", {})),
                 ],
             )
 
         # Generate embeddings
         print("Generating embeddings …")
-        texts = [r.get("full_text", "") for r in self.recipes]
+        texts = [r.get("full_text", "") for r in recipes]
         embeddings = generate_embeddings(texts, model=self.embedding_model)
 
         # Store embeddings
         print("Storing embeddings …")
         for recipe, emb in tqdm(
-            zip(self.recipes, embeddings), total=len(self.recipes), desc="Storing embeddings"
+            zip(recipes, embeddings), total=len(recipes), desc="Storing embeddings"
         ):
             emb_literal = "[" + ",".join(str(x) for x in emb) + "]"
             conn.execute(
@@ -205,12 +188,6 @@ class HybridRetriever:
         create_vector_index(self.db_path)
         print("Done.")
 
-    def load_recipes(self, recipes_path: Path) -> None:
-        """Load recipe metadata for result enrichment (no DB write)."""
-        with open(recipes_path) as f:
-            self.recipes = json.load(f)
-        self._recipe_lookup = {r["id"]: r for r in self.recipes}
-
     # ------------------------------------------------------------------
     # Search
     # ------------------------------------------------------------------
@@ -220,47 +197,42 @@ class HybridRetriever:
         query: str,
         top_k: int = 5,
         mode: Literal["hybrid", "fts", "vector"] = "hybrid",
-    ) -> List[Dict[str, Any]]:
+    ) -> List[SearchResult]:
         """Retrieve recipes by *mode*: ``hybrid``, ``fts``, or ``vector``."""
-        conn = get_connection(self.db_path)
-
-        try:
+        with Session(self.engine) as session:
+            # Search → (id, score) tuples
             if mode == "fts":
-                raw = _fts_search(conn, query, top_k=top_k)
+                id_scores = _fts_search(session, query, top_k=top_k)
             elif mode == "vector":
                 q_emb = generate_query_embedding(query, model=self.embedding_model)
-                raw = _vector_search(conn, q_emb, top_k=top_k)
+                id_scores = _vector_search(session, q_emb, top_k=top_k)
             else:
-                fts_results = _fts_search(conn, query, top_k=self.fts_top_k)
+                fts_results = _fts_search(session, query, top_k=self.fts_top_k)
                 q_emb = generate_query_embedding(query, model=self.embedding_model)
-                vec_results = _vector_search(conn, q_emb, top_k=self.vector_top_k)
-                raw = reciprocal_rank_fusion(fts_results, vec_results, k=self.rrf_k)[
-                    :top_k
-                ]
-        finally:
-            conn.close()
+                vec_results = _vector_search(session, q_emb, top_k=self.vector_top_k)
+                id_scores = reciprocal_rank_fusion(
+                    fts_results, vec_results, k=self.rrf_k
+                )[:top_k]
 
-        return self._enrich(raw, top_k)
+            # Fetch full Recipe objects via ORM
+            ids: list[int] = [doc_id for doc_id, _ in id_scores]
+            if not ids:
+                return []
+            recipes: Sequence[Recipe] = session.exec(
+                select(Recipe).where(Recipe.id.in_(ids))  # type: ignore[arg-type]
+            ).all()
+            recipe_map: dict[int, Recipe] = {r.id: r for r in recipes}
+
+        # Build result dicts preserving search ranking order
+        results: List[SearchResult] = []
+        for rank, (doc_id, score) in enumerate(id_scores, start=1):
+            recipe: Recipe | None = recipe_map.get(doc_id)
+            if recipe is None:
+                continue
+            d = SearchResult(**recipe.model_dump(exclude={"embedding"}), rank=rank, bm25_score=score)
+            results.append(d)
+        return results
 
     def retrieve_bm25(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """Compatibility alias used by ``BaseRetrievalEvaluator``."""
-        return self.retrieve(query, top_k=top_k, mode="hybrid")
-
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    def _enrich(self, results: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
-        """Enrich raw search results with full recipe data."""
-        enriched: List[Dict[str, Any]] = []
-        for i, result in enumerate(results[:top_k]):
-            recipe_data = self._recipe_lookup.get(result["id"], {})
-            merged = {**recipe_data, **result}
-            merged["rank"] = i + 1
-            # BaseRetrievalEvaluator reads 'bm25_score'
-            merged["bm25_score"] = result.get(
-                "rrf_score",
-                result.get("fts_score", result.get("vector_score", 0.0)),
-            )
-            enriched.append(merged)
-        return enriched
+        return [x.model_dump() for x in self.retrieve(query, top_k=top_k, mode="fts")]
