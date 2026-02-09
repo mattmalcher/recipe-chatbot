@@ -1,6 +1,4 @@
 """SQLModel table definitions for recipe storage in DuckDB."""
-import tabnanny
-
 from typing import Optional
 
 import sqlalchemy as sa
